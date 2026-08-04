@@ -10,6 +10,29 @@ import 'settings_dialog.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Error boundary — biar app nggak crash diam-diam di release
+  FlutterError.onError = (FlutterErrorDetails details) {
+    debugPrint('FlutterError: ${details.exception}\n${details.stack}');
+    FlutterError.presentError(details);
+  };
+  ErrorWidget.builder = (FlutterErrorDetails details) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.error_outline, color: Colors.red, size: 48),
+            const SizedBox(height: 12),
+            Text('Terjadi error:\n${details.exception}',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.red)),
+          ]),
+        ),
+      ),
+    );
+  };
+
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   runApp(const HermesTalkApp());
 }
@@ -59,15 +82,31 @@ class _TalkPageState extends State<TalkPage> {
   @override
   void initState() {
     super.initState();
-    _loadSettings();
-    _initTts();
+    // Inisialisasi async — jangan panggil TTS methods langsung di initState
+    // karena di release mode flutter_tts belum siap dan crash dengan
+    // NoSuchMethodError: android.speech.tts
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadSettings();
+      _initTts();
+    });
   }
 
+  // Lazy-init flag — hanya inisialisasi TTS sekali saat benar-benar dipakai
+  bool _ttsReady = false;
+
   Future<void> _initTts() async {
-    await _tts.setLanguage('id-ID');
-    await _tts.setSpeechRate(0.5);
-    await _tts.setVolume(1.0);
-    _tts.setCompletionHandler(() => setState(() => _speaking = false));
+    try {
+      await _tts.setLanguage('id-ID');
+      await _tts.setSpeechRate(0.5);
+      await _tts.setVolume(1.0);
+      await _tts.setSpeechRate(0.5);
+      _tts.setCompletionHandler(() => setState(() => _speaking = false));
+      _ttsReady = true;
+    } catch (e) {
+      // TTS mungkin nggak support di device — app tetap jalan, hanya TTS-mu mati
+      debugPrint('TTS init failed: $e');
+      _ttsReady = false;
+    }
   }
 
   Future<void> _loadSettings() async {
@@ -131,8 +170,17 @@ class _TalkPageState extends State<TalkPage> {
       _messages.map((m) => {'role': m.isUser ? 'user' : 'assistant', 'content': m.text}).toList();
 
   void _speak(String text) async {
+    // Lazy-init TTS saat pertama dipakai — hindari crash NoSuchMethodError
+    if (!_ttsReady) await _initTts();
+    if (!_ttsReady) return; // TTS tidak available — lewati diam diam
+
     setState(() => _speaking = true);
-    await _tts.speak(text);
+    try {
+      await _tts.speak(text);
+    } catch (e) {
+      debugPrint('TTS speak failed: $e');
+      setState(() => _speaking = false);
+    }
   }
 
   void _stopSpeaking() async {
