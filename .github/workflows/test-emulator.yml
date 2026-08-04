@@ -1,4 +1,4 @@
-name: Test on Emulator
+name: Test on Emulator (x86_64)
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
 
 jobs:
   test-emulator:
-    runs-on: ubuntu-24.04-arm64
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -22,38 +22,40 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build debug APK
-        run: flutter build apk --debug --target-platform=android-arm64
+      - name: Build debug APK (x86_64)
+        run: flutter build apk --debug --target-platform=android-x64
 
-      - name: Create Android Emulator (ARM64 native)
+      - name: Create Android Emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
-          arch: arm64
+          arch: x86_64
           target: google_apis
           force-avd-creation: true
           emulator-options: -no-snapshot -no-window -no-audio -no-boot-anim
           script: |
-            echo "=== Emulator boot complete ==="
-            adb shell "getprop sys.boot_completed" 2>/dev/null || echo "waiting..."
-            sleep 15
+            echo "=== Emulator ready ==="
+            adb wait-for-device
+            adb shell "getprop sys.boot_completed; echo BOOT_DONE"
+            for i in {1..30}; do adb shell "getprop sys.boot_completed" | grep -q 1 && break; sleep 2; done
 
-            echo "=== Find built APK ==="
-            ls build/app/outputs/flutter-apk/
+            echo "=== List build output ==="
+            find build -name "app-debug.apk" -type f 2>/dev/null; ls build/app/outputs/flutter-apk/ 2>/dev/null
 
-            echo "=== Install APK (debug) ==="
-            adb install -r build/app/outputs/flutter-apk/app-arm64-v8b-debug.apk || \
+            echo "=== Install APK ==="
             adb install -r build/app/outputs/flutter-apk/app-debug.apk
 
             echo "=== Launch app ==="
-            adb shell "am start -n com.teleman70001.hermestalk/com.teleman70001.hermestalk.MainActivity"
-            sleep 10
+            adb shell "am start -n com.teleman70001.hermestalk/com.teleman70001.hermestalk MainActivity"
+            sleep 8
 
-            echo "=== Check if app crashed ==="
-            adb shell "ps -A | grep hermestalk || echo 'APP CRASHED — Process not running'"
+            echo "=== Check process ==="
+            adb shell "ps -A | grep hermestalk || echo 'APP_CRASHED_PROCESS_NOT_RUNNING'"
 
-            echo "=== Extract crash logcat ==="
+            echo "=== Crash logcat ==="
             adb logcat -d -s Flutter,AndroidRuntime,CRASH,FlutterError *:E | tail -200
 
-            echo "=== Full system log ==="
-            adb logcat -d | grep -i 'hermestalk\|crash\|fatal\|exception\|error' | tail -100
+            echo "=== All error lines ==="
+            adb logcat -d | grep -iE 'hermestalk|crash|fatal|exception|VM_ERROR|abort' | tail -100
+
+            echo "=== DONE ==="
