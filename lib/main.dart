@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -11,30 +13,36 @@ import 'settings_dialog.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Error boundary — biar app nggak crash diam-diam di release
-  FlutterError.onError = (FlutterErrorDetails details) {
-    debugPrint('FlutterError: ${details.exception}\n${details.stack}');
-    FlutterError.presentError(details);
-  };
-  ErrorWidget.builder = (FlutterErrorDetails details) {
-    return Scaffold(
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Icon(Icons.error_outline, color: Colors.red, size: 48),
-            const SizedBox(height: 12),
-            Text('Terjadi error:\n${details.exception}',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.red)),
-          ]),
+  // Zone global — tangkap SEMUA async error (Future tidak tertangkap)
+  runZonedGuarded(() {
+    // Error boundary — biar app nggak crash diam-diam di release
+    FlutterError.onError = (FlutterErrorDetails details) {
+      debugPrint('FlutterError: ${details.exception}\n${details.stack}');
+      FlutterError.presentError(details);
+    };
+    ErrorWidget.builder = (FlutterErrorDetails details) {
+      return const Scaffold(
+        body: Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.error_outline, color: Colors.red, size: 48),
+              SizedBox(height: 12),
+              Text('Terjadi error aplikasi.\nHubungi developer.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.red)),
+            ]),
+          ),
         ),
-      ),
-    );
-  };
+      );
+    };
 
-  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-  runApp(const HermesTalkApp());
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    runApp(const HermesTalkApp());
+  }, (error, stack) {
+    debugPrint('Zone Fatal Error: $error\n$stack');
+    FlutterError.dumpErrorToConsole(FlutterErrorDetails(exception: error, stack: stack));
+  });
 }
 
 class HermesTalkApp extends StatelessWidget {
@@ -82,43 +90,67 @@ class _TalkPageState extends State<TalkPage> {
   @override
   void initState() {
     super.initState();
-    // Inisialisasi async — jangan panggil TTS methods langsung di initState
-    // karena di release mode flutter_tts belum siap dan crash dengan
-    // NoSuchMethodError: android.speech.tts
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _loadSettings();
-      _initTts();
-    });
+    // Inisialisasi async di post-frame — hindari crash NoSuchMethodError di release
+    WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrap());
   }
 
-  // Lazy-init flag — hanya inisialisasi TTS sekali saat benar-benar dipakai
-  bool _ttsReady = false;
-
-  Future<void> _initTts() async {
-    try {
-      await _tts.setLanguage('id-ID');
-      await _tts.setSpeechRate(0.5);
-      await _tts.setVolume(1.0);
-      await _tts.setSpeechRate(0.5);
-      _tts.setCompletionHandler(() => setState(() => _speaking = false));
-      _ttsReady = true;
-    } catch (e) {
-      // TTS mungkin nggak support di device — app tetap jalan, hanya TTS-mu mati
-      debugPrint('TTS init failed: $e');
-      _ttsReady = false;
-    }
+  /// Lazy-init TTS + load settings
+  Future<void> _bootstrap() async {
+    await _loadSettings();
+    // Jangan auto-init TTS — baru init saat user minta bicara
   }
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _endpoint = prefs.getString('endpoint') ??
-          'http://168.110.208.118:20128/v1/chat/completions';
+      _endpoint = prefs.getString('endpoint') ?? 'http://168.110.208.118:20128/v1/chat/completions';
       _apiKey = prefs.getString('api_key') ?? '';
       _model = prefs.getString('model') ?? 'FREE';
     });
   }
 
+  // --- TTS ---
+  bool _ttsReady = false;
+
+  Future<bool> _ensureTts() async {
+    if (_ttsReady) return true;
+    try {
+      await _tts.setLanguage('id-ID');
+      await _tts.setSpeechRate(0.5);
+      await _tts.setVolume(1.0);
+      await _tts.setPitch(1.0);
+      _tts.setCompletionHandler(() => setState(() => _speaking = false));
+      _ttsReady = true;
+      return true;
+    } catch (e) {
+      debugPrint('TTS init failed: $e');
+      _ttsReady = false;
+      return false;
+    }
+  }
+
+  void _speak(String text) async {
+    if (!_ttsReady) {
+      final ok = await _ensureTts();
+      if (!ok) return;
+    }
+    setState(() => _speaking = true);
+    try {
+      await _tts.speak(text);
+    } catch (e) {
+      debugPrint('TTS speak failed: $e');
+      if (mounted) setState(() => _speaking = false);
+    }
+  }
+
+  void _stopSpeaking() async {
+    try {
+      await _tts.stop();
+    } catch (_) {}
+    if (mounted) setState(() => _speaking = false);
+  }
+
+  // --- Chat flow ---
   void _sendMessage(String text) async {
     final msg = text.trim();
     if (msg.isEmpty || _loading) return;
@@ -146,63 +178,43 @@ class _TalkPageState extends State<TalkPage> {
       ).timeout(const Duration(seconds: 30));
 
       if (resp.statusCode != 200) {
-        throw Exception('HTTP ${resp.statusCode}: ${resp.body}');
+        throw FormatException('HTTP ${resp.statusCode}: ${resp.body}');
       }
 
       final data = jsonDecode(resp.body);
       final reply = (data['choices'][0]['message']['content'] as String).trim();
 
-      setState(() {
-        _messages.add(ChatMessage(text: reply, isUser: false));
-        _loading = false;
-      });
-
+      setState(() => _messages.add(ChatMessage(text: reply, isUser: false)));
       _speak(reply);
-    } catch (e) {
-      setState(() {
-        _messages.add(ChatMessage(text: 'Error: $e', isUser: false));
-        _loading = false;
-      });
+    } catch (e, st) {
+      debugPrint('HTTP error: $e\n$st');
+      if (mounted) {
+        setState(() => _messages.add(ChatMessage(text: 'Error: $e', isUser: false)));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
   List<Map<String, dynamic>> _buildChatHistory() =>
       _messages.map((m) => {'role': m.isUser ? 'user' : 'assistant', 'content': m.text}).toList();
 
-  void _speak(String text) async {
-    // Lazy-init TTS saat pertama dipakai — hindari crash NoSuchMethodError
-    if (!_ttsReady) await _initTts();
-    if (!_ttsReady) return; // TTS tidak available — lewati diam diam
-
-    setState(() => _speaking = true);
-    try {
-      await _tts.speak(text);
-    } catch (e) {
-      debugPrint('TTS speak failed: $e');
-      setState(() => _speaking = false);
-    }
-  }
-
-  void _stopSpeaking() async {
-    await _tts.stop();
-    setState(() => _speaking = false);
-  }
-
   void _openSettings() {
     showDialog(
-        context: context,
-        builder: (_) => SettingsDialog(
-              endpoint: _endpoint,
-              apiKey: _apiKey,
-              model: _model,
-              onSave: (ep, key, mdl) {
-                setState(() {
-                  _endpoint = ep;
-                  _apiKey = key;
-                  _model = mdl;
-                });
-              },
-            ));
+      context: context,
+      builder: (_) => SettingsDialog(
+        endpoint: _endpoint,
+        apiKey: _apiKey,
+        model: _model,
+        onSave: (ep, key, mdl) {
+          setState(() {
+            _endpoint = ep;
+            _apiKey = key;
+            _model = mdl;
+          });
+        },
+      ),
+    );
   }
 
   @override
@@ -235,16 +247,13 @@ class _TalkPageState extends State<TalkPage> {
           Expanded(
             child: _messages.isEmpty
                 ? const Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.chat, size: 64, color: Colors.teal),
-                        SizedBox(height: 12),
-                        Text('Bisa langsung ketik atau speech-to-text\nuntuk ngobrol sama Hermes Agent',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.grey)),
-                      ],
-                    ),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.chat, size: 64, color: Colors.teal),
+                      SizedBox(height: 12),
+                      Text('Ketik pesan atau pencet mikrofon\nuntuk ngobrol sama Hermes Agent',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.grey)),
+                    ]),
                   )
                 : ListView.builder(
                     padding: const EdgeInsets.all(12),
@@ -276,7 +285,7 @@ class _TalkPageState extends State<TalkPage> {
                   controller: _textCtrl,
                   onSubmitted: _sendMessage,
                   decoration: InputDecoration(
-                    hintText: 'Ketik pesan...',
+                    hintText: 'Ketik pesan... (model: $_model)',
                     border: const OutlineInputBorder(),
                     suffixIcon: _speaking
                         ? IconButton(icon: const Icon(Icons.stop), onPressed: _stopSpeaking)
@@ -287,15 +296,7 @@ class _TalkPageState extends State<TalkPage> {
               const SizedBox(width: 8),
               FloatingActionButton(
                 mini: true,
-                onPressed: _loading
-                    ? null
-                    : () {
-                        if (_speaking) {
-                          _stopSpeaking();
-                        } else {
-                          _sendMessage(_textCtrl.text);
-                        }
-                      },
+                onPressed: _loading ? null : () => _sendMessage(_textCtrl.text),
                 child: _loading
                     ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                     : const Icon(Icons.send),

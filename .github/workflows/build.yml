@@ -8,10 +8,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mode: [release]
 
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -30,8 +32,9 @@ jobs:
       - name: Analyze
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
 
-      - name: Build APK (arm64 only)
-        run: flutter build apk --release --target-platform=android-arm64
+      - name: Build APK
+        run: |
+          flutter build apk --release --target-platform=android-arm64 --split-debug-info=build/debug-info
 
       - name: Find APKs
         run: find build -name "*.apk" -type f
@@ -39,5 +42,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: hermestalk-apk
+          name: hermestalk-apk-${{ matrix.mode }}
           path: build/app/outputs/flutter-apk/*.apk
