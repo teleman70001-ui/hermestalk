@@ -1,0 +1,59 @@
+name: Test on Emulator
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-emulator:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.4'
+          channel: 'stable'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build debug APK
+        run: flutter build apk --debug --target-platform=android-arm64
+
+      - name: Create Android Emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 31
+          arch: x86_64
+          force-avd-creation: true
+          emulator-options: -no-snapshot -no-window -no-audio
+          script: |
+            echo "=== Emulator ready ==="
+            adb shell "getprop sys.boot_completed" 2>/dev/null
+            sleep 20
+            echo "=== Install APK ==="
+            adb install -r build/app/outputs/flutter-apk/app-release-arm64-v8b.apk || \
+            adb install -r build/app/outputs/flutter-apk/app-arm64-v8b-release.apk || \
+            adb install -r build/app/outputs/flutter-apk/app-release.apk
+
+            echo "=== Launch app ==="
+            adb shell "am start -n com.teleman70001.hermestalk/com.teleman70001.hermestalk.MainActivity"
+
+            echo "=== Wait 8s for app to load ==="
+            sleep 8
+
+            echo "=== Check if app crashed ==="
+            adb shell "ps -A | grep hermestalk || echo 'Process not running — app crashed'"
+
+            echo "=== Extract Logcat (last 200 lines) ==="
+            adb logcat -d -s Flutter,AndroidRuntime,CRASH,Tts *:E | tail -200 || echo "no flutter logcat"
+
+            echo "=== Full crash dump ==="
+            adb logcat -d -s AndroidRuntime,CRASH,FlutterError | tail -100 || echo "no crash log"
+
+            echo "=== Done ==="
